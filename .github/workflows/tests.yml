@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-symbolic.txt
+
+      - name: Generate synthetic fixtures
+        run: |
+          python tests/gen_test_improvements.py tests/pac_test_improvements
+          python tests/gen_test_improvements_macho.py tests/pac_test_improvements_macho
+
+      - name: Compile
+        run: python -m py_compile pacforge.py tests/test_regressions.py
+
+      - name: Unit and regression tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: ELF CLI smoke test
+        run: python pacforge.py tests/pac_test_improvements --constraints --transitions --auth-window --div-collisions --symbolic
+
+      - name: Mach-O CLI smoke test
+        run: python pacforge.py tests/pac_test_improvements_macho --constraints --transitions --auth-window --div-collisions --symbolic

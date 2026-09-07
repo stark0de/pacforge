@@ -1,0 +1,41 @@
+name: Runtime Context Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'pacforge.py'
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Generate test binary
+        run: cd tests && python3 gen_test_macho.py
+
+      - name: Runtime context detection
+        run: |
+          echo "=== sysctl PAC feature keys ==="
+          sysctl hw.optional.arm.FEAT_PAuth 2>/dev/null || echo "FEAT_PAuth: key not found"
+          sysctl hw.optional.arm.FEAT_PAuth2 2>/dev/null || echo "FEAT_PAuth2: key not found"
+          sysctl hw.optional.arm.FEAT_FPAC 2>/dev/null || echo "FEAT_FPAC: key not found"
+          sysctl hw.optional.arm.FEAT_BTI 2>/dev/null || echo "FEAT_BTI: key not found"
+          sysctl hw.optional.armv8_3_compnum 2>/dev/null || echo "armv8_3_compnum: key not found"
+          echo ""
+          echo "=== PACForge runtime context ==="
+          python3 pacforge.py tests/pac_test_macho --runtime-ctx
+
+      - name: Smoke test all modules
+        run: |
+          python3 pacforge.py tests/pac_test_macho --all > runtime-smoke.txt 2>&1
+          tail -50 runtime-smoke.txt

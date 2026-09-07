@@ -1,0 +1,2 @@
+-r requirements.txt
+z3-solver>=4.12

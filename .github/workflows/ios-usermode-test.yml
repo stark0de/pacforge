@@ -1,0 +1,134 @@
+name: iOS Usermode Binary Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract-and-test:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install --formula blacktop/tap/ipsw
+          python -m pip install -r requirements.txt
+
+      - name: Download IPSW
+        run: |
+          echo "=== Downloading iPhone 15 Pro IPSW ==="
+          ipsw download ipsw --device iPhone16,1 --latest -o ./ipsw_dl
+          ls -lh ./ipsw_dl/
+
+      - name: Extract dyld_shared_cache
+        run: |
+          IPSW_FILE=$(ls ./ipsw_dl/*.ipsw)
+          echo "=== Extracting dyld_shared_cache from $IPSW_FILE ==="
+          ipsw extract --dyld --dyld-arch arm64e -o ./dsc_out "$IPSW_FILE"
+          echo "=== Freeing IPSW to save disk ==="
+          rm -rf ./ipsw_dl
+          ls -lh ./dsc_out/
+
+      - name: Extract usermode binaries
+        run: |
+          DSC=$(find ./dsc_out -name 'dyld_shared_cache_arm64e' -type f | head -1)
+          if [ -z "$DSC" ]; then
+            echo "ERROR: dyld_shared_cache_arm64e not found"
+            find ./dsc_out -type f | head -20
+            exit 1
+          fi
+          echo "=== DSC path: $DSC ==="
+          mkdir -p ios_binaries
+
+          DYLIBS=(
+            "/usr/lib/system/libsystem_kernel.dylib"
+            "/usr/lib/system/libsystem_platform.dylib"
+            "/System/Library/Frameworks/Security.framework/Security"
+            "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+          )
+
+          for dylib in "${DYLIBS[@]}"; do
+            name=$(basename "$dylib")
+            echo "--- Extracting $name ---"
+            ipsw dyld extract "$DSC" "$dylib" -o ./ios_extract 2>&1 || echo "WARN: $name failed"
+          done
+
+          echo "=== Extracted files ==="
+          find ./ios_extract -type f 2>/dev/null || echo "No files in ios_extract"
+
+          find ./ios_extract -type f | while read f; do
+            base=$(basename "$f")
+            cp "$f" "ios_binaries/$base"
+            echo "Copied: $base ($(stat -f%z "$f") bytes)"
+          done
+
+          echo "=== Freeing DSC to save disk ==="
+          rm -rf ./dsc_out ./ios_extract
+          ls -lh ios_binaries/
+
+      - name: Run PACForge on iOS usermode binaries
+        run: |
+          echo "======================================================================"
+          echo "  PACForge iOS Usermode Analysis"
+          echo "======================================================================"
+
+          shopt -s nullglob
+          bins=(ios_binaries/*)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "ERROR: No binaries found in ios_binaries/"
+            exit 1
+          fi
+
+          for bin in "${bins[@]}"; do
+            name=$(basename "$bin")
+            [[ "$name" == *.json ]] && continue
+            echo ""
+            echo "======================================================================"
+            echo "  $name"
+            echo "======================================================================"
+            report="ios_binaries/${name}_report.txt"
+            python3 pacforge.py "$bin" --all > "$report" 2>&1
+            sed -n '1,200p' "$report"
+            echo ""
+            echo "--- Export findings ---"
+            python3 pacforge.py "$bin" --export-findings "ios_binaries/${name}_review.json" 2>&1
+          done
+
+      - name: Runtime context check
+        run: |
+          echo "======================================================================"
+          echo "  Runtime Context (ARM64 macOS runner)"
+          echo "======================================================================"
+          bin=$(ls ios_binaries/*.dylib 2>/dev/null | head -1)
+          if [ -n "$bin" ]; then
+            python3 pacforge.py "$bin" --runtime-ctx 2>&1
+          else
+            echo "No binary available for runtime context check"
+          fi
+
+      - name: Summary
+        run: |
+          echo "======================================================================"
+          echo "  Results Summary"
+          echo "======================================================================"
+          for json in ios_binaries/*_review.json; do
+            name=$(basename "$json" _review.json)
+            count=$(python3 -c "import json; d=json.load(open('$json')); print(d['total_findings'])")
+            echo "  $name: $count findings"
+          done
+
+      - name: Upload binaries and results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-usermode-binaries
+          path: ios_binaries/
+          retention-days: 30
